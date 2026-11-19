@@ -34,6 +34,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import * as btc from "@scure/btc-signer";
 import { keyAggregate, sortKeys } from "@scure/btc-signer/musig2.js";
+import { decodeMainnetInvoice } from "./invoice.js";
 
 const sha256 = (value) => createHash("sha256").update(value).digest();
 function expectHex(value, byteLength, name) {
@@ -160,6 +161,8 @@ export function termsDigest(terms) {
                 sats: terms.amount_sats,
                 exp: terms.expires_at,
                 due: terms.lightning_due_at,
+                inv: terms.invoice ?? null,
+                ph: terms.payment_hash ?? null,
             }),
         ),
     ).toString("hex");
@@ -240,11 +243,33 @@ export class CollateralJournal {
                 amount_sats INTEGER NOT NULL,
                 rbf_signaled INTEGER NOT NULL DEFAULT 0,
                 confirmations INTEGER NOT NULL DEFAULT 0,
+                invoice TEXT,
+                payment_hash TEXT,
+                fronting_state TEXT NOT NULL DEFAULT 'none',
+                fronting_error TEXT,
+                provider_order_id TEXT,
+                funding_outpoint TEXT,
+                final_status TEXT,
                 receipt_json TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         `);
+        // Forward migration for journals created before invoice binding/fronting.
+        const present = new Set(
+            this.db.prepare(`PRAGMA table_info(l1_collateral_orders)`).all().map((column) => column.name),
+        );
+        for (const [name, ddl] of [
+            ["invoice", "TEXT"],
+            ["payment_hash", "TEXT"],
+            ["fronting_state", "TEXT NOT NULL DEFAULT 'none'"],
+            ["fronting_error", "TEXT"],
+            ["provider_order_id", "TEXT"],
+            ["funding_outpoint", "TEXT"],
+            ["final_status", "TEXT"],
+        ]) {
+            if (!present.has(name)) this.db.exec(`ALTER TABLE l1_collateral_orders ADD COLUMN ${name} ${ddl}`);
+        }
     }
 
     close() {
@@ -255,8 +280,9 @@ export class CollateralJournal {
         this.db
             .prepare(
                 `INSERT INTO l1_collateral_orders
-                 (order_id, order_ref, state, terms_digest, terms_json, address, script_pubkey_hex, amount_sats)
-                 VALUES (?, ?, 'created', ?, ?, ?, ?, ?)`,
+                 (order_id, order_ref, state, terms_digest, terms_json, address, script_pubkey_hex, amount_sats,
+                  invoice, payment_hash)
+                 VALUES (?, ?, 'created', ?, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
                 order.order_id,
@@ -266,6 +292,8 @@ export class CollateralJournal {
                 order.address,
                 order.script_pubkey_hex,
                 order.amount_sats,
+                order.invoice ?? null,
+                order.payment_hash ?? null,
             );
         return this.get(order.order_id);
     }
@@ -281,7 +309,14 @@ export class CollateralJournal {
     }
 
     // Idempotent: a replay of the same outpoint returns the stored receipt.
+    // Fronting fields survive a receipt refresh so a new validation cannot
+    // resurrect an already-paid order.
     recordDeposit({ orderId, outpoint, state, rbfSignaled, confirmations, receipt }) {
+        const previous = this.get(orderId)?.receipt || {};
+        const merged = { ...receipt };
+        for (const key of ["fronting", "payment_hash", "provider_order_id", "funding_outpoint", "final_status"]) {
+            if (previous[key] !== undefined) merged[key] = previous[key];
+        }
         this.db
             .prepare(
                 `UPDATE l1_collateral_orders
@@ -289,7 +324,86 @@ export class CollateralJournal {
                      receipt_json = ?, updated_at = CURRENT_TIMESTAMP
                  WHERE order_id = ?`,
             )
-            .run(state, outpoint, rbfSignaled ? 1 : 0, confirmations, JSON.stringify(receipt), orderId);
+            .run(state, outpoint, rbfSignaled ? 1 : 0, confirmations, JSON.stringify(merged), orderId);
+        return this.get(orderId);
+    }
+
+    // Atomic exactly-once gate. Returns false when the order is already claimed
+    // or paid; throws when the supplied invoice/payment hash contradicts the
+    // binding written at order creation.
+    claimFronting(orderId, { invoice, paymentHash }) {
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const order = this.get(orderId);
+            if (!order) throw new CollateralError(`unknown order ${orderId}`, "unknown_order");
+            if (order.fronting_state === "paid" || order.receipt?.fronting === "paid") {
+                this.db.exec("COMMIT");
+                return false;
+            }
+            if (order.payment_hash && order.payment_hash !== paymentHash) {
+                throw new CollateralError(
+                    `invoice payment hash ${paymentHash} differs from order ${order.payment_hash}`,
+                    "payment_hash_mismatch",
+                );
+            }
+            if (order.invoice && order.invoice !== invoice) {
+                throw new CollateralError("invoice differs from the one bound to the order", "invoice_mismatch");
+            }
+            if (order.receipt?.fronting === "started") {
+                this.db.exec("COMMIT");
+                return false;
+            }
+            const receipt = { ...(order.receipt || {}), fronting: "started", payment_hash: paymentHash };
+            this.db
+                .prepare(
+                    `UPDATE l1_collateral_orders
+                     SET fronting_state = 'started', invoice = COALESCE(invoice, ?),
+                         payment_hash = COALESCE(payment_hash, ?), receipt_json = ?,
+                         fronting_error = NULL, updated_at = CURRENT_TIMESTAMP
+                     WHERE order_id = ?`,
+                )
+                .run(invoice, paymentHash, JSON.stringify(receipt), orderId);
+            this.db.exec("COMMIT");
+            return true;
+        } catch (error) {
+            this.db.exec("ROLLBACK");
+            throw error;
+        }
+    }
+
+    // Persist provider evidence. The receipt keeps the 0-conf risk fields and
+    // gains the payment binding; `fronting` is what blocks a second send.
+    recordFronting(orderId, { providerOrderId, fundingOutpoint, finalStatus }) {
+        const order = this.get(orderId);
+        if (!order) throw new CollateralError(`unknown order ${orderId}`, "unknown_order");
+        const outpoint = fundingOutpoint && typeof fundingOutpoint === "object"
+            ? `${fundingOutpoint.txid}:${fundingOutpoint.vout}`
+            : fundingOutpoint;
+        const receipt = {
+            ...(order.receipt || {}),
+            fronting: "paid",
+            provider_order_id: providerOrderId ?? null,
+            funding_outpoint: outpoint ?? null,
+            final_status: finalStatus,
+        };
+        this.db
+            .prepare(
+                `UPDATE l1_collateral_orders
+                 SET fronting_state = 'paid', provider_order_id = ?, funding_outpoint = ?,
+                     final_status = ?, receipt_json = ?, updated_at = CURRENT_TIMESTAMP
+                 WHERE order_id = ?`,
+            )
+            .run(providerOrderId ?? null, outpoint ?? null, finalStatus ?? null, JSON.stringify(receipt), orderId);
+        return this.get(orderId);
+    }
+
+    recordFrontingFailure(orderId, message) {
+        this.db
+            .prepare(
+                `UPDATE l1_collateral_orders
+                 SET fronting_error = ?, updated_at = CURRENT_TIMESTAMP WHERE order_id = ?`,
+            )
+            .run(String(message), orderId);
         return this.get(orderId);
     }
 
@@ -331,6 +445,7 @@ export async function createCollateralOrder({
     clientPk33,
     orderRef,
     amountSats,
+    invoice,
     network = "bitcoin",
     apiBaseUrl,
     journal,
@@ -342,6 +457,9 @@ export async function createCollateralOrder({
     if (!orderRef) throw new Error("order_ref required");
     assertCaps(amountSats);
     networkParams(network);
+    // The invoice is the payment the router will front: bind hash and amount in
+    // the terms digest so neither can be swapped after the deposit exists.
+    const bound = invoice ? decodeMainnetInvoice(invoice, amountSats, now() / 1000) : null;
     const cosigner = await fetchCosignerTerms({ apiBaseUrl, clientPk33, fetchImpl });
     const csv = cosigner.csv;
     const nowMs = now();
@@ -356,6 +474,8 @@ export async function createCollateralOrder({
         amount_sats: amountSats,
         expires_at: Math.floor(nowMs / 1000) + ttlSeconds,
         lightning_due_at: Math.floor(nowMs / 1000) + lightningDueSeconds,
+        invoice: bound?.invoice ?? null,
+        payment_hash: bound?.paymentHash ?? null,
     };
     const derived = reconstructCollateral(draft);
     const digest = termsDigest(draft);
@@ -387,6 +507,8 @@ export async function createCollateralOrder({
               address: terms.address,
               script_pubkey_hex: terms.script_pubkey_hex,
               amount_sats: amountSats,
+              invoice: terms.invoice,
+              payment_hash: terms.payment_hash,
           })
         : null;
 

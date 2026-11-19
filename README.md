@@ -67,3 +67,40 @@ The full dependency-backed `npm test` passed **19/19** on Node `v22.22.3`. Earli
 - Outgoing solver refunds are tracked as `REFUND_READY`/`REFUND_PENDING`; refund signing/broadcast is not implemented.
 - After restart, an in-memory Nuri approval session cannot be reconstructed. Existing funding evidence remains resubmittable, but `send/complete` can be `UNAVAILABLE_AFTER_RESTART`.
 - No production deployment is claimed. Outgoing CLI and MCP mainnet payments are proven; reverse flow and refund execution remain unproven.
+
+## Raw L1 0-conf collateral fronting
+
+`src/l1-collateral.js` locks user sats in the existing Nuri MuSig2+CSV taproot
+address on L1; `src/l1-front.js` turns a *seen, unconfirmed* deposit into one
+Lightning payment through the proven `CardLightningDriver`. The Arkade VHTLC
+path above is untouched.
+
+```bash
+npm run l1:create -- --client-pk <33-byte-hex> --ref order-1 --sats 25000 --invoice lnbc...
+npm run l1:check  -- --order l1c_... --txid <hex> --vout 0
+npm run l1:front  -- --order l1c_... --txid <hex> --vout 0 --invoice lnbc... --amount-sats 25000
+npm run l1:show   -- --order l1c_...
+```
+
+Fronting preconditions, all checked before the driver is touched:
+
+1. `validateDeposit` accepts script, exact value, and outpoint; a reused
+   outpoint on another order is refused.
+2. `receipt.eligible_0conf === true` — the funding tx is unconfirmed and every
+   input sequence is BIP125 non-signaling. Confirmed deposits do **not** front.
+3. Deposit value, order `amount_sats`, and invoice amount are identical, and the
+   invoice payment hash equals the one bound at order creation.
+4. `now < lightning_due_at` and `now < expires_at`.
+5. The supplied invoice is the one in the terms digest.
+
+Ordering is the exactly-once mechanism: a durable claim is written before the
+driver call, and the provider `orderId`, `fundingOutpoint`, and `finalStatus`
+are persisted into the receipt and journal columns afterwards. A replay of a
+paid order returns the stored receipt; a replay after a crash (claim, no result)
+returns `fronting: "unknown"` and does not pay again. The driver journal keeps
+its own second `wallet.send` guard, so both layers agree.
+
+Caps stay 5 000..100 000 sats. **Remaining, not implemented here:** claiming the
+L1 collateral after the payment settles (MuSig2 aggregate spend or the user's
+CSV leaf), mempool eviction/disappearance handling, expired-order refunds, MCP
+exposure, and a live mainnet proof.

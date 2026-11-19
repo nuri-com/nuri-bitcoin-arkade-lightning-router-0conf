@@ -12,7 +12,9 @@
     "card-lightning": "node ./cli.js",
     "l1:create": "node ./scripts/l1-collateral.js create",
     "l1:check": "node ./scripts/l1-collateral.js check",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "l1:front": "node ./scripts/l1-collateral.js front",
+    "l1:show": "node ./scripts/l1-collateral.js show"
   },
   "dependencies": {
     "@arkade-os/sdk": "0.4.74",
