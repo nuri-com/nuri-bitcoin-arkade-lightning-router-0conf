@@ -2,12 +2,15 @@
 
 Small `node:http` wrapper around the existing outgoing SwapKit driver: one BOLT11 payment from the existing Nuri card Arkade wallet, using preconfirmed Arkade VHTLC collateral and the existing SwapKit solver corridor. It adds no node, CLN, regtest, arkd, swap protocol, framework, or dependency.
 
+The current scope is the outgoing SwapKit corridor plus raw L1 0-conf collateral fronting. Reverse flow, refund execution, and any other corridor remain unproven.
+
 ## Status and evidence
 
 - **CLI mainnet proof:** order `ord_d073e885c6d9b72483388085abffb227b29e970f8143ab1feed0840b44a56076`, Ark funding transaction `7d762a0ac6e8f537df44f48708d34bc66b41970803e2e6d706ef962cf2af3fd1`, **1000 sats settled**. The recipient preimage's SHA256 matched the invoice payment hash.
 - **MCP mainnet proof:** order `ord_8fe501e631efc7bee3495a9500012c98a03c90593887fc85ec8c59db50d3ed47`, Ark funding transaction `9066c5781324d0af5d60e58ef5bc3a291d804b344843536637a7d11fced4e7e0`, final status `COMPLETED`, **1000 sats settled**. The recipient preimage's SHA256 matched the invoice payment hash.
 - Machine-readable receipts: [`proofs/mainnet-outgoing.json`](proofs/mainnet-outgoing.json). No production deployment or reverse-flow proof is claimed.
 - The card follow-up cosign fixes are retained: each signature request carries its own PSBT, and checkpoint signatures are preserved when inputs are updated.
+- **Raw L1 0-conf collateral fronting is implemented and covered by the full 46/46 synthetic suite**, including RBF, replay, expiry, amount, script, and invoice-hash checks. No live L1 mainnet proof is claimed yet.
 
 ## Start
 
@@ -59,7 +62,7 @@ npm test
 
 The suite uses synthetic provider/wallet fixtures and an ephemeral loopback HTTP server. It covers the one-tool catalog, dry/execute gating, settled-state mapping, per-PSBT cosign binding, replay/crash handling, and credential leakage. Fixtures are not mainnet proof.
 
-The full dependency-backed `npm test` passed **19/19** on Node `v22.22.3`. Earlier cloud checks also passed the MCP suite; the cloud runner was unavailable for the final full-suite run, which used the already-authorized local card session without live wallet calls.
+The full dependency-backed `npm test` passed **46/46** on Node `v22.22.3`. Earlier cloud checks also passed the MCP suite; the cloud runner was unavailable for the final full-suite run, which used the already-authorized local card session without live wallet calls.
 
 ## Remaining work and limits
 

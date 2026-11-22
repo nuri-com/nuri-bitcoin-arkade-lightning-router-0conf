@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-20
+
+- Added raw L1 0-conf collateral fronting: a plain on-chain deposit in the existing Nuri MuSig2+CSV address can now front one bound Lightning payment without waiting for a confirmation (`src/l1-collateral.js`, `src/l1-front.js`).
+- Added exact outpoint, amount, script, RBF, expiry, and invoice-hash validation, plus durable exactly-once replay and crash recovery (`test/l1-collateral.test.js`, `test/l1-front.test.js`).
+- Added 46/46 synthetic tests for the full outgoing path, including the new L1 collateral flow, risk receipts, and MCP surface.
+- Added a decision-ledger entry for the raw L1 collateral model and updated the README to state the current scope, test count, and remaining unproven work (`DECISIONS.md`, `README.md`).
+
 ## 2026-10-29
 
 - Added the public `0conf` MCP/API server with one tool, dry-by-default money actions, health source SHA, allowlisted receipts, credential redaction, and a JSON Schema (`server.js`, `schema/receipt.schema.json`).

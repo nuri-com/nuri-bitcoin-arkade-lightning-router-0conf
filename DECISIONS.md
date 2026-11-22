@@ -31,3 +31,11 @@
 - Decision: serve one `0conf` tool with `quote`/`create`/`finalize`/`track` over a minimal `node:http` server; create and finalize remain dry unless `execute:true` is explicit.
 - Why: package the mainnet-proven corridor without adding infrastructure or implying that the reverse flow exists.
 - Consequence: card configuration stays in local files, receipts use an allowlisted schema with credential redaction, and reverse Lightning-to-Arkade work remains a separate implementation and proof.
+
+## D5 — Add a raw L1 0-conf collateral mode
+
+- Date: 2026-11-20
+- Status: ACTIVE
+- Decision: allow a plain on-chain deposit to the existing Nuri MuSig2+CSV address to front one bound Lightning payment, with exact outpoint, amount, script, RBF, expiry, and invoice-hash validation before the router pays (`src/l1-collateral.js`, `src/l1-front.js`).
+- Why: the existing VHTLC corridor depends on Arkade collateral; users should also be able to use a normal Bitcoin L1 deposit without depending on an Arkade VTXO.
+- Consequence: the router still underwrites the payment and only fronts after the deposit passes every risk check; claiming the L1 collateral after settlement, mempool eviction handling, and expired-order refunds remain separate work. No live L1 mainnet proof is claimed yet.
